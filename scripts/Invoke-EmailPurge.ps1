@@ -2,8 +2,10 @@
 <#
 Interactive Exchange Online compliance search + purge helper.
 
-Walks through: search for matching messages -> review what was found (and
-confirm nothing else matched) -> explicit typed confirmation -> purge.
+Walks through: look for a previous search that was never purged or cleaned
+up and offer to resume it, or search for matching messages -> review what
+was found (and confirm nothing else matched) -> explicit typed confirmation
+-> purge -> offer to remove the compliance search now that it is logged.
 No purge happens without that separate confirmation step.
 #>
 
@@ -16,6 +18,10 @@ $ErrorActionPreference = 'Stop'
 # Auth), which is what Connect-IPPSSession and the compliance search cmdlets
 # used here require now that Basic Auth is retired.
 $MinimumModuleVersion = [version]'3.2.0'
+
+# Every search this script creates uses this prefix, so resume-detection only
+# ever looks at searches this script created, not other admins' searches.
+$SearchNamePrefix = 'EmailPurge_'
 
 function Ensure-ExchangeOnlineModule {
     $installed = Get-Module -ListAvailable -Name ExchangeOnlineManagement |
@@ -83,6 +89,28 @@ function Wait-ComplianceAction {
     return $action
 }
 
+function Get-ResumableEmailPurgeSearches {
+    Get-ComplianceSearch |
+        Where-Object { $_.Name -like "$SearchNamePrefix*" } |
+        Where-Object {
+            $purgeAction = Get-ComplianceSearchAction -Identity "$($_.Name)_Purge" -ErrorAction SilentlyContinue
+            -not $purgeAction -or $purgeAction.Status -ne 'Completed'
+        }
+}
+
+function New-ComplianceActionFresh {
+    # Removes a leftover action with this identity first, if one exists, so a
+    # retried preview/purge does not fail with "an action already exists."
+    param(
+        [Parameter(Mandatory)][string]$Identity,
+        [Parameter(Mandatory)][scriptblock]$Create
+    )
+    if (Get-ComplianceSearchAction -Identity $Identity -ErrorAction SilentlyContinue) {
+        Remove-ComplianceSearchAction -Identity $Identity -Confirm:$false
+    }
+    & $Create
+}
+
 Ensure-ExchangeOnlineModule
 Ensure-Sessions
 
@@ -97,50 +125,73 @@ try {
     Write-Host "what was found, and only purges after you type an explicit confirmation."
     Write-Host ""
 
-    $sender = Read-Host "Sender email address to search for (optional, press Enter to skip)"
-    $recipient = Read-Host "Recipient (To) email address to search for (optional, press Enter to skip)"
+    $resumable = @(Get-ResumableEmailPurgeSearches)
+    $searchName = $null
+    $query = $null
 
-    $subject = $null
-    if ([string]::IsNullOrWhiteSpace($sender) -and [string]::IsNullOrWhiteSpace($recipient)) {
-        while ([string]::IsNullOrWhiteSpace($subject)) {
-            $subject = Read-Host "Subject (required, since no sender or recipient was given)"
+    if ($resumable.Count -gt 0) {
+        Write-Host "Found $($resumable.Count) previous search(es) that were never purged or cleaned up:" -ForegroundColor Yellow
+        for ($i = 0; $i -lt $resumable.Count; $i++) {
+            $r = $resumable[$i]
+            Write-Host "  [$($i + 1)] $($r.Name) - Status: $($r.Status), Items: $($r.Items)"
+            Write-Host "      Query: $($r.ContentMatchQuery)"
         }
-    } else {
-        $subject = Read-Host "Subject to search for (optional, press Enter to skip)"
+        $resumeChoice = Read-Host "Enter a number to resume that search and finish the purge, or press Enter to start a new search"
+        if ($resumeChoice -match '^\d+$' -and [int]$resumeChoice -ge 1 -and [int]$resumeChoice -le $resumable.Count) {
+            $chosen = $resumable[[int]$resumeChoice - 1]
+            $searchName = $chosen.Name
+            $query = $chosen.ContentMatchQuery
+            Write-Host "Resuming search '$searchName'." -ForegroundColor Cyan
+        }
+        Write-Host ""
     }
-
-    $startDate = Read-DateYyMmDd "Start date (yy/mm/dd, optional; leave blank to search as far back as available)"
-    $endDate = Read-DateYyMmDd "End date (yy/mm/dd, optional; leave blank to search through right now)"
 
     $purgeTypeInput = Read-Host "Purge type: SoftDelete (recoverable ~14 days, recommended) or HardDelete (permanent) [SoftDelete]"
     $purgeType = if ($purgeTypeInput -match '^(?i)hard') { 'HardDelete' } else { 'SoftDelete' }
 
-    $clauses = @()
-    if ($sender)    { $clauses += "(from:`"$sender`")" }
-    if ($recipient) { $clauses += "(to:`"$recipient`")" }
-    if ($subject)   { $clauses += "(subject:`"$subject`")" }
-    # Only add a bound when its date was actually given. Omitting the lower
-    # bound with only an end date means the search reaches as far back as
-    # indexed mail exists; omitting the upper bound with only a start date
-    # means it naturally extends through the moment the search runs.
-    if ($startDate) { $clauses += "(received>=$($startDate.ToString('yyyy-MM-dd')))" }
-    if ($endDate)   { $clauses += "(received<=$($endDate.ToString('yyyy-MM-dd')))" }
-    $query = $clauses -join ' AND '
+    if (-not $searchName) {
+        $sender = Read-Host "Sender email address to search for (optional, press Enter to skip)"
+        $recipient = Read-Host "Recipient (To) email address to search for (optional, press Enter to skip)"
 
-    $dateRangeDescription =
-        if ($startDate -and $endDate) { "$($startDate.ToString('yyyy-MM-dd')) through $($endDate.ToString('yyyy-MM-dd'))" }
-        elseif ($startDate) { "$($startDate.ToString('yyyy-MM-dd')) through right now" }
-        elseif ($endDate) { "as far back as available through $($endDate.ToString('yyyy-MM-dd'))" }
-        else { "no date restriction" }
+        $subject = $null
+        if ([string]::IsNullOrWhiteSpace($sender) -and [string]::IsNullOrWhiteSpace($recipient)) {
+            while ([string]::IsNullOrWhiteSpace($subject)) {
+                $subject = Read-Host "Subject (required, since no sender or recipient was given)"
+            }
+        } else {
+            $subject = Read-Host "Subject to search for (optional, press Enter to skip)"
+        }
 
-    $searchName = "EmailPurge_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+        $startDate = Read-DateYyMmDd "Start date (yy/mm/dd, optional; leave blank to search as far back as available)"
+        $endDate = Read-DateYyMmDd "End date (yy/mm/dd, optional; leave blank to search through right now)"
 
-    Write-Host ""
-    Write-Host "Query: $query"
-    Write-Host "Date range: $dateRangeDescription"
-    Write-Host "Creating compliance search '$searchName'..."
-    New-ComplianceSearch -Name $searchName -ExchangeLocation All -ContentMatchQuery $query | Out-Null
-    Start-ComplianceSearch -Identity $searchName | Out-Null
+        $clauses = @()
+        if ($sender)    { $clauses += "(from:`"$sender`")" }
+        if ($recipient) { $clauses += "(to:`"$recipient`")" }
+        if ($subject)   { $clauses += "(subject:`"$subject`")" }
+        # Only add a bound when its date was actually given. Omitting the lower
+        # bound with only an end date means the search reaches as far back as
+        # indexed mail exists; omitting the upper bound with only a start date
+        # means it naturally extends through the moment the search runs.
+        if ($startDate) { $clauses += "(received>=$($startDate.ToString('yyyy-MM-dd')))" }
+        if ($endDate)   { $clauses += "(received<=$($endDate.ToString('yyyy-MM-dd')))" }
+        $query = $clauses -join ' AND '
+
+        $dateRangeDescription =
+            if ($startDate -and $endDate) { "$($startDate.ToString('yyyy-MM-dd')) through $($endDate.ToString('yyyy-MM-dd'))" }
+            elseif ($startDate) { "$($startDate.ToString('yyyy-MM-dd')) through right now" }
+            elseif ($endDate) { "as far back as available through $($endDate.ToString('yyyy-MM-dd'))" }
+            else { "no date restriction" }
+
+        $searchName = "$SearchNamePrefix$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+
+        Write-Host ""
+        Write-Host "Query: $query"
+        Write-Host "Date range: $dateRangeDescription"
+        Write-Host "Creating compliance search '$searchName'..."
+        New-ComplianceSearch -Name $searchName -ExchangeLocation All -ContentMatchQuery $query | Out-Null
+        Start-ComplianceSearch -Identity $searchName | Out-Null
+    }
 
     Write-Host "Waiting for search to complete..."
     do {
@@ -155,14 +206,23 @@ try {
     Write-Host "Size: $($search.Size)"
 
     if ($search.Items -eq 0) {
-        Write-Host "No matching items were found. Nothing to purge. Search '$searchName' is left in place for reference." -ForegroundColor Yellow
+        Write-Host "No matching items were found. Nothing to purge." -ForegroundColor Yellow
+        $cleanupEmpty = Read-Host "Remove this empty compliance search now? (Y/n)"
+        if ($cleanupEmpty -notmatch '^(?i)n') {
+            Remove-ComplianceSearch -Identity $searchName -Confirm:$false
+            Write-Host "Removed compliance search '$searchName'." -ForegroundColor Cyan
+        } else {
+            Write-Host "Left compliance search '$searchName' in place." -ForegroundColor Yellow
+        }
         return
     }
 
     Write-Host ""
     Write-Host "Generating a preview so you can confirm no unexpected senders/recipients matched..." -ForegroundColor Cyan
     $previewActionName = "${searchName}_Preview"
-    New-ComplianceSearchAction -SearchName $searchName -Preview | Out-Null
+    New-ComplianceActionFresh -Identity $previewActionName -Create {
+        New-ComplianceSearchAction -SearchName $searchName -Preview | Out-Null
+    }
     Wait-ComplianceAction -Identity $previewActionName -Label "Preview" | Out-Null
 
     $previewDetails = (Get-ComplianceSearchAction -Identity $previewActionName -Details).Results
@@ -181,13 +241,28 @@ try {
     }
 
     Write-Host "Purging with $purgeType..."
-    New-ComplianceSearchAction -SearchName $searchName -Purge -PurgeType $purgeType -Confirm:$false | Out-Null
-    $purgeAction = Wait-ComplianceAction -Identity "${searchName}_Purge" -Label "Purge"
+    $purgeActionName = "${searchName}_Purge"
+    New-ComplianceActionFresh -Identity $purgeActionName -Create {
+        New-ComplianceSearchAction -SearchName $searchName -Purge -PurgeType $purgeType -Confirm:$false | Out-Null
+    }
+    $purgeAction = Wait-ComplianceAction -Identity $purgeActionName -Label "Purge"
 
     Write-Host ""
     Write-Host "Purge action finished with status: $($purgeAction.Status)" -ForegroundColor Cyan
     Write-Host "Search name: $searchName"
     Write-Host "Log written to: $logPath"
+
+    if ($purgeAction.Status -eq 'Completed') {
+        $cleanup = Read-Host "Purge is complete and logged. Remove this compliance search now? (Y/n)"
+        if ($cleanup -notmatch '^(?i)n') {
+            Remove-ComplianceSearch -Identity $searchName -Confirm:$false
+            Write-Host "Removed compliance search '$searchName'." -ForegroundColor Cyan
+        } else {
+            Write-Host "Left compliance search '$searchName' in place." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "Purge did not complete successfully, so the search was left in place. Re-run this script and choose to resume '$searchName' to retry." -ForegroundColor Yellow
+    }
 }
 finally {
     Stop-Transcript | Out-Null
