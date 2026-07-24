@@ -5,8 +5,9 @@ Used to manage compliance searches in Exchange Online and purge messages, useful
 ## Requirements
 
 - PowerShell 7 or later
-- The `ExchangeOnlineManagement` module (`Install-Module ExchangeOnlineManagement -Scope CurrentUser`)
 - An account with permission to run Content Search / eDiscovery actions in Microsoft Purview
+
+The `ExchangeOnlineManagement` module (3.2.0 or later) is installed automatically the first time you run the script if it is missing, and upgraded automatically if an older version is found. Nothing is reinstalled if a compatible version is already present.
 
 ## Usage
 
@@ -18,7 +19,7 @@ Run the interactive script from a PowerShell 7 prompt:
 
 It will:
 
-1. Connect to Exchange Online and Security & Compliance PowerShell if you are not already connected.
+1. Install or update the `ExchangeOnlineManagement` module if needed, then connect to Exchange Online and Security & Compliance PowerShell if you are not already connected.
 2. Ask for a sender, an optional recipient, and (if neither sender nor recipient is given) a required subject, plus an optional start/end date in `yy/mm/dd` format.
 3. Create and run a compliance search, then show the item count and a preview of the matched messages so you can confirm nothing outside the intended sender/recipient/subject matched.
 4. Ask you to type `DELETE` to confirm before purging. Anything else aborts without deleting anything.
