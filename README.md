@@ -11,7 +11,29 @@ The `ExchangeOnlineManagement` module (3.2.0 or later) is installed automaticall
 
 ## Usage
 
-Run the interactive script from a PowerShell 7 prompt:
+### Run directly from GitHub
+
+You can run the script straight from this repo without cloning it first:
+
+```powershell
+irm https://raw.githubusercontent.com/Kinsman4249/email-purge-helper/main/scripts/Invoke-EmailPurge.ps1 | iex
+```
+
+This does not require changing your PowerShell execution policy or unblocking anything. Execution policy (and the "this file is unsigned" prompt) only applies when PowerShell runs a `.ps1` *file* from disk. `irm | iex` downloads the script text and runs it with `Invoke-Expression` in your current session, which is a different code path that the file-based execution policy does not gate.
+
+One side effect: because there is no script file on disk in this mode, the script cannot find its own folder, so the run log is written to `.\logs` under your current working directory instead of next to the script. Everything else behaves the same.
+
+If you'd rather download and run it as a file (for example, to keep a local copy or review it first), you'll hit the execution-policy check, since a downloaded `.ps1` is flagged unsigned:
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/Kinsman4249/email-purge-helper/main/scripts/Invoke-EmailPurge.ps1 -OutFile Invoke-EmailPurge.ps1
+Unblock-File .\Invoke-EmailPurge.ps1
+powershell -ExecutionPolicy Bypass -File .\Invoke-EmailPurge.ps1
+```
+
+`-ExecutionPolicy Bypass` on the invocation only affects that one process, not your machine's default policy. Alternatively, set your session/user policy once with `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` and then run the script normally with `Unblock-File` first.
+
+### Run from a local clone
 
 ```powershell
 ./scripts/Invoke-EmailPurge.ps1
