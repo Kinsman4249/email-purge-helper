@@ -42,7 +42,7 @@ powershell -ExecutionPolicy Bypass -File .\Invoke-EmailPurge.ps1
 It will:
 
 1. Install or update the `ExchangeOnlineManagement` module if needed, then connect to Exchange Online and Security & Compliance PowerShell if you are not already connected.
-2. Look for previous searches this script created (named `EmailPurge_*`) that were never purged or cleaned up, and offer to resume one instead of starting over.
+2. Look for previous searches this script created (named `EmailPurge_*`) that were never purged or cleaned up, and offer to resume one instead of starting over. You can also ask it to check every compliance search, including ones started manually or by someone else, in case that's the one you're trying to finish.
 3. If you don't resume one, ask for a sender, an optional recipient, and (if neither sender nor recipient is given) a required subject, plus an optional start/end date in `yy/mm/dd` format.
 4. Create and run a compliance search, then show the item count and a preview of the matched messages so you can confirm nothing outside the intended sender/recipient/subject matched.
 5. Ask you to type `DELETE` to confirm before purging. Anything else aborts without deleting anything, leaving the search in place so it shows up as resumable next time.

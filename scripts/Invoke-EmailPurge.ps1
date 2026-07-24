@@ -2,11 +2,12 @@
 <#
 Interactive Exchange Online compliance search + purge helper.
 
-Walks through: look for a previous search that was never purged or cleaned
-up and offer to resume it, or search for matching messages -> review what
-was found (and confirm nothing else matched) -> explicit typed confirmation
--> purge -> offer to remove the compliance search now that it is logged.
-No purge happens without that separate confirmation step.
+Walks through: look for a previous search (created by this script, or any
+other unfinished compliance search on request) that was never purged or
+cleaned up and offer to resume it, or search for matching messages -> review
+what was found (and confirm nothing else matched) -> explicit typed
+confirmation -> purge -> offer to remove the compliance search now that it
+is logged. No purge happens without that separate confirmation step.
 #>
 
 [CmdletBinding()]
@@ -19,8 +20,8 @@ $ErrorActionPreference = 'Stop'
 # used here require now that Basic Auth is retired.
 $MinimumModuleVersion = [version]'3.2.0'
 
-# Every search this script creates uses this prefix, so resume-detection only
-# ever looks at searches this script created, not other admins' searches.
+# Every search this script creates uses this prefix, so resume-detection can
+# tell its own searches apart from ones started manually or by someone else.
 $SearchNamePrefix = 'EmailPurge_'
 
 function Ensure-ExchangeOnlineModule {
@@ -89,13 +90,40 @@ function Wait-ComplianceAction {
     return $action
 }
 
-function Get-ResumableEmailPurgeSearches {
-    Get-ComplianceSearch |
-        Where-Object { $_.Name -like "$SearchNamePrefix*" } |
-        Where-Object {
-            $purgeAction = Get-ComplianceSearchAction -Identity "$($_.Name)_Purge" -ErrorAction SilentlyContinue
-            -not $purgeAction -or $purgeAction.Status -ne 'Completed'
-        }
+function Get-ResumableSearches {
+    # Without -AllSearches, only considers searches this script created (the
+    # EmailPurge_ prefix). With -AllSearches, considers every compliance
+    # search, including ones started manually or by someone else, so a
+    # search that was set up outside this script can still be resumed.
+    param([switch]$AllSearches)
+    $searches = Get-ComplianceSearch
+    if (-not $AllSearches) {
+        $searches = $searches | Where-Object { $_.Name -like "$SearchNamePrefix*" }
+    }
+    $searches | Where-Object {
+        $purgeAction = Get-ComplianceSearchAction -Identity "$($_.Name)_Purge" -ErrorAction SilentlyContinue
+        -not $purgeAction -or $purgeAction.Status -ne 'Completed'
+    }
+}
+
+function Write-ResumableSearchList {
+    param([Parameter(Mandatory)][object[]]$Searches)
+    for ($i = 0; $i -lt $Searches.Count; $i++) {
+        $r = $Searches[$i]
+        Write-Host "  [$($i + 1)] $($r.Name) - Status: $($r.Status), Items: $($r.Items)"
+        Write-Host "      Query: $($r.ContentMatchQuery)"
+    }
+}
+
+function Resolve-ResumeChoice {
+    param(
+        [Parameter(Mandatory)][object[]]$Searches,
+        [Parameter(Mandatory)][string]$Choice
+    )
+    if ($Choice -match '^\d+$' -and [int]$Choice -ge 1 -and [int]$Choice -le $Searches.Count) {
+        return $Searches[[int]$Choice - 1]
+    }
+    return $null
 }
 
 function New-ComplianceActionFresh {
@@ -125,26 +153,39 @@ try {
     Write-Host "what was found, and only purges after you type an explicit confirmation."
     Write-Host ""
 
-    $resumable = @(Get-ResumableEmailPurgeSearches)
     $searchName = $null
     $query = $null
 
-    if ($resumable.Count -gt 0) {
-        Write-Host "Found $($resumable.Count) previous search(es) that were never purged or cleaned up:" -ForegroundColor Yellow
-        for ($i = 0; $i -lt $resumable.Count; $i++) {
-            $r = $resumable[$i]
-            Write-Host "  [$($i + 1)] $($r.Name) - Status: $($r.Status), Items: $($r.Items)"
-            Write-Host "      Query: $($r.ContentMatchQuery)"
-        }
-        $resumeChoice = Read-Host "Enter a number to resume that search and finish the purge, or press Enter to start a new search"
-        if ($resumeChoice -match '^\d+$' -and [int]$resumeChoice -ge 1 -and [int]$resumeChoice -le $resumable.Count) {
-            $chosen = $resumable[[int]$resumeChoice - 1]
-            $searchName = $chosen.Name
-            $query = $chosen.ContentMatchQuery
-            Write-Host "Resuming search '$searchName'." -ForegroundColor Cyan
-        }
-        Write-Host ""
+    $ownResumable = @(Get-ResumableSearches)
+    if ($ownResumable.Count -gt 0) {
+        Write-Host "Found $($ownResumable.Count) previous search(es) created by this script that were never purged or cleaned up:" -ForegroundColor Yellow
+        Write-ResumableSearchList -Searches $ownResumable
+    } else {
+        Write-Host "No previous searches created by this script are waiting on a purge." -ForegroundColor Yellow
     }
+
+    $resumeChoice = Read-Host "Enter a number to resume one listed above, 'other' to also check compliance searches not created by this script (e.g. started manually), or press Enter to start a new search"
+    $chosen = Resolve-ResumeChoice -Searches $ownResumable -Choice $resumeChoice
+
+    if (-not $chosen -and $resumeChoice -match '^(?i)other$') {
+        $otherResumable = @(Get-ResumableSearches -AllSearches | Where-Object { $_.Name -notin $ownResumable.Name })
+        if ($otherResumable.Count -eq 0) {
+            Write-Host "No other unfinished compliance searches were found." -ForegroundColor Yellow
+        } else {
+            Write-Host ""
+            Write-Host "Other unfinished compliance search(es), including any started outside this script:" -ForegroundColor Yellow
+            Write-ResumableSearchList -Searches $otherResumable
+            $otherChoice = Read-Host "Enter a number to resume one listed above, or press Enter to start a new search"
+            $chosen = Resolve-ResumeChoice -Searches $otherResumable -Choice $otherChoice
+        }
+    }
+
+    if ($chosen) {
+        $searchName = $chosen.Name
+        $query = $chosen.ContentMatchQuery
+        Write-Host "Resuming search '$searchName'." -ForegroundColor Cyan
+    }
+    Write-Host ""
 
     $purgeTypeInput = Read-Host "Purge type: SoftDelete (recoverable ~14 days, recommended) or HardDelete (permanent) [SoftDelete]"
     $purgeType = if ($purgeTypeInput -match '^(?i)hard') { 'HardDelete' } else { 'SoftDelete' }
