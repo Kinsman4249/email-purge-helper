@@ -109,8 +109,8 @@ try {
         $subject = Read-Host "Subject to search for (optional, press Enter to skip)"
     }
 
-    $startDate = Read-DateYyMmDd "Start date (yy/mm/dd, optional, press Enter to skip)"
-    $endDate = Read-DateYyMmDd "End date (yy/mm/dd, optional, press Enter to skip)"
+    $startDate = Read-DateYyMmDd "Start date (yy/mm/dd, optional; leave blank to search as far back as available)"
+    $endDate = Read-DateYyMmDd "End date (yy/mm/dd, optional; leave blank to search through right now)"
 
     $purgeTypeInput = Read-Host "Purge type: SoftDelete (recoverable ~14 days, recommended) or HardDelete (permanent) [SoftDelete]"
     $purgeType = if ($purgeTypeInput -match '^(?i)hard') { 'HardDelete' } else { 'SoftDelete' }
@@ -119,14 +119,25 @@ try {
     if ($sender)    { $clauses += "(from:`"$sender`")" }
     if ($recipient) { $clauses += "(to:`"$recipient`")" }
     if ($subject)   { $clauses += "(subject:`"$subject`")" }
+    # Only add a bound when its date was actually given. Omitting the lower
+    # bound with only an end date means the search reaches as far back as
+    # indexed mail exists; omitting the upper bound with only a start date
+    # means it naturally extends through the moment the search runs.
     if ($startDate) { $clauses += "(received>=$($startDate.ToString('yyyy-MM-dd')))" }
     if ($endDate)   { $clauses += "(received<=$($endDate.ToString('yyyy-MM-dd')))" }
     $query = $clauses -join ' AND '
+
+    $dateRangeDescription =
+        if ($startDate -and $endDate) { "$($startDate.ToString('yyyy-MM-dd')) through $($endDate.ToString('yyyy-MM-dd'))" }
+        elseif ($startDate) { "$($startDate.ToString('yyyy-MM-dd')) through right now" }
+        elseif ($endDate) { "as far back as available through $($endDate.ToString('yyyy-MM-dd'))" }
+        else { "no date restriction" }
 
     $searchName = "EmailPurge_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
 
     Write-Host ""
     Write-Host "Query: $query"
+    Write-Host "Date range: $dateRangeDescription"
     Write-Host "Creating compliance search '$searchName'..."
     New-ComplianceSearch -Name $searchName -ExchangeLocation All -ContentMatchQuery $query | Out-Null
     Start-ComplianceSearch -Identity $searchName | Out-Null
