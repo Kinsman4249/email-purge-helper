@@ -1,0 +1,10 @@
+# Changelog
+
+This file tracks real changes to this repository. For the rules on how entries here should be written, see CHANGELOG_TEMPLATE.md.
+
+### Initial interactive purge script and repository setup (round one)
+
+1. Added `scripts/Invoke-EmailPurge.ps1`, an interactive PowerShell 7 script that walks through searching Exchange Online for messages by sender, recipient, subject, and date range, reviewing a preview of the matches, and purging only after a typed `DELETE` confirmation. Sender and recipient are both optional; a subject is required only when neither sender nor recipient is provided, so the search can never be built from nothing. Start and end dates are entered in `yy/mm/dd` format and are optional. The script checks for and creates the `Connect-ExchangeOnline` and `Connect-IPPSSession` sessions automatically if they are not already active, rather than assuming the user has connected beforehand. It offers a choice between `SoftDelete` (recoverable for about 14 days) and `HardDelete` (permanent) at the confirmation step, defaulting to `SoftDelete` if left blank. Every run writes a timestamped transcript under `scripts/logs/` recording the search name, the query used, item counts, and the purge result, so there is an audit trail independent of the Purview portal. This was tested manually against a personal mailbox by searching for a self-sent test message, confirming the abort path leaves the message in place, and confirming the `DELETE` path soft-deletes it.
+2. Added the repository's community-health files (`CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `SECURITY.md`), issue templates for bug reports and feature requests, and a pull request template, based on the maintainer's standard templates with the project name and repository URL filled in.
+3. Added `CHANGELOG_TEMPLATE.md`, the formatting guide for how entries in this file should be written, so future rounds of work follow the same structure.
+4. Updated `README.md` with setup requirements, usage instructions for the new script, and a manual testing procedure, replacing the original one-line description.
