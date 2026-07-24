@@ -8,3 +8,7 @@ This file tracks real changes to this repository. For the rules on how entries h
 2. Added the repository's community-health files (`CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `SECURITY.md`), issue templates for bug reports and feature requests, and a pull request template, based on the maintainer's standard templates with the project name and repository URL filled in.
 3. Added `CHANGELOG_TEMPLATE.md`, the formatting guide for how entries in this file should be written, so future rounds of work follow the same structure.
 4. Updated `README.md` with setup requirements, usage instructions for the new script, and a manual testing procedure, replacing the original one-line description.
+
+### Automatic module install (round two)
+
+5. Changed `Ensure-ExchangeOnlineModule` in `scripts/Invoke-EmailPurge.ps1` to install the `ExchangeOnlineManagement` module automatically for the current user when it is missing, and to upgrade it automatically when an installed version is older than the 3.2.0 floor the script's cmdlets require, instead of throwing and telling the user to install it manually. If a version at or above the floor is already present, the script skips installation entirely and just imports it. Updated `README.md` to describe this behavior instead of listing manual installation as a prerequisite.

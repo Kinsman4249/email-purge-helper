@@ -12,10 +12,27 @@ param()
 
 $ErrorActionPreference = 'Stop'
 
+# 3.2.0 is the first release built on the REST-based cmdlets (no WinRM/Basic
+# Auth), which is what Connect-IPPSSession and the compliance search cmdlets
+# used here require now that Basic Auth is retired.
+$MinimumModuleVersion = [version]'3.2.0'
+
 function Ensure-ExchangeOnlineModule {
-    if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
-        throw "The ExchangeOnlineManagement module is required. Install it with: Install-Module ExchangeOnlineManagement -Scope CurrentUser"
+    $installed = Get-Module -ListAvailable -Name ExchangeOnlineManagement |
+        Sort-Object Version -Descending |
+        Select-Object -First 1
+
+    if (-not $installed) {
+        Write-Host "ExchangeOnlineManagement module not found. Installing for the current user..." -ForegroundColor Cyan
+        Install-Module ExchangeOnlineManagement -Scope CurrentUser -MinimumVersion $MinimumModuleVersion -Force -AllowClobber
+    } elseif ($installed.Version -lt $MinimumModuleVersion) {
+        Write-Host "ExchangeOnlineManagement $($installed.Version) is installed but $MinimumModuleVersion or later is required. Updating..." -ForegroundColor Cyan
+        Install-Module ExchangeOnlineManagement -Scope CurrentUser -MinimumVersion $MinimumModuleVersion -Force -AllowClobber
+    } else {
+        Write-Host "ExchangeOnlineManagement $($installed.Version) already installed, skipping install." -ForegroundColor Cyan
     }
+
+    Import-Module ExchangeOnlineManagement -MinimumVersion $MinimumModuleVersion -ErrorAction Stop
 }
 
 function Ensure-Sessions {
@@ -48,7 +65,7 @@ function Read-DateYyMmDd {
         try {
             return [datetime]::ParseExact($raw.Trim(), 'yy/MM/dd', [System.Globalization.CultureInfo]::InvariantCulture)
         } catch {
-            Write-Host "Could not parse '$raw' as yy/mm/dd. Example: 26/07/08. Leave blank to skip." -ForegroundColor Yellow
+            Write-Host "Could not parse '$raw' as yy/mm/dd. Example: 24/01/15. Leave blank to skip." -ForegroundColor Yellow
         }
     }
 }
