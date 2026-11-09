@@ -312,6 +312,74 @@ function New-ComplianceActionFresh {
 Ensure-ExchangeOnlineModule
 Ensure-Sessions
 
+# Security & Compliance cmdlets only expose the parameters your RBAC roles
+# allow. If -Preview or -Purge is missing from New-ComplianceSearchAction,
+# the account lacks the matching Purview role (Global Admin alone does NOT
+# grant these). Check up front and, if needed, offer to grant them.
+function Test-PurgePermissions {
+    # Reads the parameter list of New-ComplianceSearchAction as exposed to
+    # this session and reports which of the two gated switches are present.
+    $keys = (Get-Command New-ComplianceSearchAction).Parameters.Keys
+    [pscustomobject]@{ Preview = ($keys -contains 'Preview'); Purge = ($keys -contains 'Purge') }
+}
+
+function Grant-PurgePermissions {
+    # Name of a dedicated, least-privilege role group this script manages.
+    # It holds only the two roles needed, instead of adding you to the much
+    # broader Organization Management role group.
+    $groupName = 'EmailPurgeHelper'
+    $roles = @('Preview', 'Search And Purge')
+
+    # Get-ConnectionInformation (ExchangeOnlineManagement 3.x) lists active
+    # connections; the UPN of the signed-in account is the member to add.
+    $upn = (Get-ConnectionInformation | Where-Object { $_.UserPrincipalName } | Select-Object -First 1).UserPrincipalName
+    if (-not $upn) { throw "Could not determine the signed-in account's UPN." }
+
+    # Get-RoleGroup / New-RoleGroup / Add-RoleGroupMember manage Purview role
+    # groups. Global Admin (or the Role Management role) is required.
+    $existing = Get-RoleGroup -Identity $groupName -ErrorAction SilentlyContinue
+    if (-not $existing) {
+        Write-Host "Creating role group '$groupName' with roles: $($roles -join ', '); member: $upn" -ForegroundColor Cyan
+        New-RoleGroup -Name $groupName -Roles $roles -Members $upn -Description 'Created by Invoke-EmailPurge.ps1: Preview + Search And Purge for compliance search purges.' | Out-Null
+    } else {
+        # Group already exists (e.g. created on a previous run): just make sure
+        # you're a member. Errors here usually mean "already a member".
+        Write-Host "Role group '$groupName' exists. Adding $upn as a member..." -ForegroundColor Cyan
+        try { Add-RoleGroupMember -Identity $groupName -Member $upn -ErrorAction Stop } catch { Write-Host "  $($_.Exception.Message)" -ForegroundColor Yellow }
+    }
+}
+
+$perms = Test-PurgePermissions
+if (-not ($perms.Preview -and $perms.Purge)) {
+    Write-Host "This account is missing: $(@(if (-not $perms.Preview) {'Preview'}; if (-not $perms.Purge) {'Search And Purge'}) -join ', ')" -ForegroundColor Yellow
+    $grant = Read-Host "Grant the missing roles to yourself now via role group 'EmailPurgeHelper'? (Y/n)"
+    if ($grant -notmatch '^(?i)n') {
+        Grant-PurgePermissions
+
+        # Role changes only show up in a NEW session, so drop both connections
+        # and reconnect. Propagation can still take a while after this.
+        Write-Host "Reconnecting so the new roles are picked up..." -ForegroundColor Cyan
+        Disconnect-ExchangeOnline -Confirm:$false
+        Ensure-Sessions
+        $perms = Test-PurgePermissions
+
+        if (-not ($perms.Preview -and $perms.Purge)) {
+            # Not live yet. Exit cleanly; rerunning later picks up the role.
+            Write-Host "Roles were assigned but have not propagated to this session yet (can take up to ~60 min). Close this window, open a new pwsh, and rerun the script." -ForegroundColor Yellow
+            return
+        }
+        Write-Host "Preview and Search And Purge are now available." -ForegroundColor Green
+    }
+}
+$canPreview = $perms.Preview
+$canPurge = $perms.Purge
+if (-not $canPreview) {
+    Write-Host "WARNING: -Preview unavailable. The preview step will be skipped; review results in the Purview portal instead." -ForegroundColor Yellow
+}
+if (-not $canPurge) {
+    Write-Host "WARNING: -Purge unavailable. You can still search, but the script will stop before purging." -ForegroundColor Yellow
+}
+
 # FIX: $PSScriptRoot is only populated when the script runs from a file.
 # When run via "irm <url> | iex" it is empty, and Join-Path failed with
 # "Cannot bind argument to parameter 'Path' because it is an empty string."
@@ -481,22 +549,35 @@ try {
     }
 
     Write-Host ""
-    Write-Host "Generating a preview so you can confirm no unexpected senders/recipients matched..." -ForegroundColor Cyan
-    $previewActionName = "${searchName}_Preview"
-    New-ComplianceActionFresh -Identity $previewActionName -Create {
-        # New-ComplianceSearchAction with -Preview samples matched messages
-        # (sender/recipient/subject, etc.) without deleting anything, so the
-        # user can sanity-check the results before any purge happens.
-        New-ComplianceSearchAction -SearchName $searchName -Preview | Out-Null
-    }
-    Wait-ComplianceAction -Identity $previewActionName -Label "Preview" | Out-Null
+    # Only attempt the preview if the account's roles expose -Preview (see the
+    # permission check near the top). Otherwise skip it rather than crash.
+    if ($canPreview) {
+        Write-Host "Generating a preview so you can confirm no unexpected senders/recipients matched..." -ForegroundColor Cyan
+        $previewActionName = "${searchName}_Preview"
+        New-ComplianceActionFresh -Identity $previewActionName -Create {
+            # New-ComplianceSearchAction with -Preview samples matched messages
+            # (sender/recipient/subject, etc.) without deleting anything, so the
+            # user can sanity-check the results before any purge happens.
+            New-ComplianceSearchAction -SearchName $searchName -Preview | Out-Null
+        }
+        Wait-ComplianceAction -Identity $previewActionName -Label "Preview" | Out-Null
 
-    # -Details asks for the actual preview content (the sampled message
-    # list) rather than just the action's status.
-    $previewDetails = (Get-ComplianceSearchAction -Identity $previewActionName -Details).Results
-    Write-Host ""
-    Write-Host "=== Preview details (verify sender/recipient/subject match what you expect) ===" -ForegroundColor Cyan
-    Write-Host $previewDetails
+        # -Details asks for the actual preview content (the sampled message
+        # list) rather than just the action's status.
+        $previewDetails = (Get-ComplianceSearchAction -Identity $previewActionName -Details).Results
+        Write-Host ""
+        Write-Host "=== Preview details (verify sender/recipient/subject match what you expect) ===" -ForegroundColor Cyan
+        Write-Host $previewDetails
+    } else {
+        Write-Host "Preview skipped: this account lacks the Preview role. Review the results for '$searchName' in the Purview portal before continuing." -ForegroundColor Yellow
+    }
+
+    # Stop here if purging isn't possible, leaving the search in place so it
+    # can be resumed once the role is assigned.
+    if (-not $canPurge) {
+        Write-Host "Cannot purge: this account lacks the Search And Purge role. Search '$searchName' was left in place; assign the role, reconnect, and resume it." -ForegroundColor Yellow
+        return
+    }
     Write-Host ""
     Write-Host "You can also review the full result list in the Purview compliance portal under this search's name." -ForegroundColor Yellow
 
