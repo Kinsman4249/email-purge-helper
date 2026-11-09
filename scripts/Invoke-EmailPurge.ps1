@@ -551,25 +551,35 @@ try {
     Write-Host ""
     # Only attempt the preview if the account's roles expose -Preview (see the
     # permission check near the top). Otherwise skip it rather than crash.
-    if ($canPreview) {
-        Write-Host "Generating a preview so you can confirm no unexpected senders/recipients matched..." -ForegroundColor Cyan
-        $previewActionName = "${searchName}_Preview"
-        New-ComplianceActionFresh -Identity $previewActionName -Create {
-            # New-ComplianceSearchAction with -Preview samples matched messages
-            # (sender/recipient/subject, etc.) without deleting anything, so the
-            # user can sanity-check the results before any purge happens.
-            New-ComplianceSearchAction -SearchName $searchName -Preview | Out-Null
-        }
-        Wait-ComplianceAction -Identity $previewActionName -Label "Preview" | Out-Null
+    # Per-mailbox breakdown. SuccessResults on the search itself lists each
+    # mailbox with matches as "Location: <mbx>, Item count: N, Total size: X".
+    # It needs no extra action, so it works even where -Preview does not.
+    # Lines with "Item count: 0" are filtered out to keep the list short.
+    Write-Host "=== Matches per mailbox (from search statistics) ===" -ForegroundColor Cyan
+    $perMailbox = @(($search.SuccessResults -replace '[{}]', '') -split ",\s*(?=Location:)" | Where-Object { $_ -match 'Item count:\s*[1-9]' })
+    if ($perMailbox.Count -gt 0) { $perMailbox | ForEach-Object { Write-Host "  $($_.Trim())" } } else { Write-Host "  (No per-mailbox breakdown returned.)" -ForegroundColor Yellow }
+    Write-Host ""
 
-        # -Details asks for the actual preview content (the sampled message
-        # list) rather than just the action's status.
-        $previewDetails = (Get-ComplianceSearchAction -Identity $previewActionName -Details).Results
-        Write-Host ""
-        Write-Host "=== Preview details (verify sender/recipient/subject match what you expect) ===" -ForegroundColor Cyan
-        Write-Host $previewDetails
-    } else {
-        Write-Host "Preview skipped: this account lacks the Preview role. Review the results for '$searchName' in the Purview portal before continuing." -ForegroundColor Yellow
+    # -Preview is documented as on-premises-only since the May 2025 Purview
+    # eDiscovery changes and returns (403) Forbidden in Exchange Online even
+    # with the right roles. Try it, but treat failure as "skip," not fatal.
+    if ($canPreview) {
+        try {
+            Write-Host "Attempting a message-level preview..." -ForegroundColor Cyan
+            $previewActionName = "${searchName}_Preview"
+            New-ComplianceActionFresh -Identity $previewActionName -Create {
+                # Samples matched messages without deleting anything.
+                New-ComplianceSearchAction -SearchName $searchName -Preview -ErrorAction Stop | Out-Null
+            }
+            Wait-ComplianceAction -Identity $previewActionName -Label "Preview" | Out-Null
+            # -Details returns the sampled message list, not just the status.
+            $previewDetails = (Get-ComplianceSearchAction -Identity $previewActionName -Details).Results
+            Write-Host "=== Preview details (verify sender/recipient/subject) ===" -ForegroundColor Cyan
+            Write-Host $previewDetails
+        } catch {
+            Write-Host "Preview unavailable in this tenant ($($_.Exception.Message.Trim()))." -ForegroundColor Yellow
+            Write-Host "Use the per-mailbox counts above, and sample the messages in the Purview portal (eDiscovery > Content search > '$searchName')." -ForegroundColor Yellow
+        }
     }
 
     # Stop here if purging isn't possible, leaving the search in place so it
