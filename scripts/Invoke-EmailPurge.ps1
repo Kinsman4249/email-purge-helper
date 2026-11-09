@@ -40,6 +40,14 @@ to PowerShell. Skip this if you already know PowerShell.
                           function or script accepts. [Mandatory]
                           means the caller must supply that value.
 
+  [AllowEmptyCollection()] / [AllowEmptyString()]
+                          By default a [Mandatory] parameter REJECTS an
+                          empty array or empty string ("Cannot bind
+                          argument ... because it is an empty array").
+                          These attributes tell PowerShell an empty
+                          value is acceptable and the function will
+                          handle it itself.
+
   [CmdletBinding()]        Placed above param() to opt a function or
                           script into PowerShell's standard cmdlet
                           behavior (e.g. -Verbose, -ErrorAction).
@@ -113,10 +121,11 @@ param()
 # purging) should never run if an earlier step silently failed.
 $ErrorActionPreference = 'Stop'
 
-# 3.2.0 is the first release built on the REST-based cmdlets (no WinRM/Basic
-# Auth), which is what Connect-IPPSSession and the compliance search cmdlets
-# used here require now that Basic Auth is retired.
-$MinimumModuleVersion = [version]'3.2.0'
+# 3.9.0 is the first release that supports Connect-IPPSSession
+# -EnableSearchOnlySession, which Microsoft now requires before the
+# eDiscovery cmdlets used here (e.g. New-ComplianceSearchAction) will run.
+# Older versions (3.2.0 - 3.8.x) would fail at the Connect-IPPSSession call.
+$MinimumModuleVersion = [version]'3.9.0'
 
 # Every search this script creates uses this prefix, so resume-detection can
 # tell its own searches apart from ones started manually or by someone else.
@@ -180,9 +189,8 @@ function Ensure-Sessions {
     if (-not $ippsConnected) {
         # Connect-IPPSSession opens the separate sign-in for Security &
         # Compliance PowerShell (IPPS = Information Protection and
-        # Compliance). -EnableSearchOnlySession requests a lighter-weight
-        # session limited to search-related cmdlets, which is all this
-        # script needs.
+        # Compliance). -EnableSearchOnlySession is required by Microsoft for
+        # the eDiscovery cmdlets this script uses (needs module 3.9.0+).
         Write-Host "Connecting to Security & Compliance PowerShell..." -ForegroundColor Cyan
         Connect-IPPSSession -EnableSearchOnlySession
     }
@@ -245,7 +253,9 @@ function Get-ResumableSearches {
 }
 
 function Write-ResumableSearchList {
-    param([Parameter(Mandatory)][object[]]$Searches)
+    # [AllowEmptyCollection()] lets an empty list through instead of failing
+    # parameter binding; the loop below simply prints nothing in that case.
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Searches)
     # A plain numeric for-loop (rather than foreach) is used here because we
     # need each item's position ($i + 1) to display as a pickable number,
     # matching what Resolve-ResumeChoice expects the user to type back.
@@ -257,14 +267,20 @@ function Write-ResumableSearchList {
 }
 
 function Resolve-ResumeChoice {
+    # FIX: both parameters can legitimately be empty here - $Searches is empty
+    # when no resumable searches exist, and $Choice is an empty string when
+    # the user just presses Enter. Without these attributes, a [Mandatory]
+    # parameter refuses empty values and the script crashed with
+    # "Cannot bind argument to parameter 'Searches' because it is an empty array."
     param(
-        [Parameter(Mandatory)][object[]]$Searches,
-        [Parameter(Mandatory)][string]$Choice
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Searches,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Choice
     )
     # Only treat the input as a valid pick if it's purely digits (^\d+$) and
     # falls within the range of numbers actually shown to the user. Anything
     # else (blank, "other", garbage) returns $null so the caller treats it
-    # as "no selection."
+    # as "no selection." An empty $Searches means Count is 0, so no number
+    # can ever be in range and $null is returned.
     if ($Choice -match '^\d+$' -and [int]$Choice -ge 1 -and [int]$Choice -le $Searches.Count) {
         return $Searches[[int]$Choice - 1]
     }
@@ -296,9 +312,16 @@ function New-ComplianceActionFresh {
 Ensure-ExchangeOnlineModule
 Ensure-Sessions
 
-# Build the path to a "logs" folder next to this script, and create it if it
-# doesn't exist yet, so every run's transcript has somewhere to go.
-$logDir = Join-Path $PSScriptRoot 'logs'
+# FIX: $PSScriptRoot is only populated when the script runs from a file.
+# When run via "irm <url> | iex" it is empty, and Join-Path failed with
+# "Cannot bind argument to parameter 'Path' because it is an empty string."
+# Fall back to the current directory in that case.
+$baseDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+
+# Build the path to a "logs" folder next to this script (or in the current
+# directory, per above), and create it if it doesn't exist yet, so every
+# run's transcript has somewhere to go.
+$logDir = Join-Path $baseDir 'logs'
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
 # One log file per run, timestamped so repeated runs never overwrite each
 # other's history.
